@@ -27,6 +27,9 @@ export function createGame({ env, physics, effects, ui, input }) {
   let bobTime = 0;
   const aimTarget = { x: 0, z: 0 };
   const aimPos = { x: 0, z: 0 };
+  // Scratch vector reused for every collision's contact point so impact
+  // handling stays allocation-free (effects.onImpact copies it eagerly).
+  const impactPoint = new THREE.Vector3();
 
   physics.addPedestal();
   ui.setScore(0);
@@ -73,7 +76,8 @@ export function createGame({ env, physics, effects, ui, input }) {
       const intensity = Math.min(1, (v - IMPACT_MIN) / (IMPACT_MAX - IMPACT_MIN));
       const r = e.contact.bi === piece.body ? e.contact.ri : e.contact.rj;
       const p = piece.body.position;
-      effects.onImpact(new THREE.Vector3(p.x + r.x, p.y + r.y, p.z + r.z), intensity);
+      impactPoint.set(p.x + r.x, p.y + r.y, p.z + r.z);
+      effects.onImpact(impactPoint, intensity);
     });
   }
 

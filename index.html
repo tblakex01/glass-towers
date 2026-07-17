@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Glass Towers</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='8' y='18' width='16' height='6' rx='1' fill='%239fd8ff'/%3E%3Crect x='11' y='10' width='10' height='7' rx='1' fill='%23c9b8f6'/%3E%3Crect x='13' y='4' width='6' height='5' rx='1' fill='%23a9edc9'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <div id="hud">
+      <div id="score-panel">
+        <div class="stat">
+          <span class="stat-label">Score</span>
+          <span class="stat-value" id="score">0</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Best</span>
+          <span class="stat-value" id="best">0</span>
+        </div>
+      </div>
+      <div id="next-panel">
+        <span class="stat-label">Next</span>
+        <canvas id="next-preview" width="112" height="112"></canvas>
+      </div>
+      <div id="hint">Move: mouse / drag / arrows &middot; Drop: click / tap / space</div>
+      <div id="toast" class="hidden"></div>
+    </div>
+
+    <div id="game-over" class="hidden">
+      <div id="game-over-card">
+        <h1>Shattered</h1>
+        <p id="game-over-subtitle">Your tower toppled.</p>
+        <div id="final-stats">
+          <div class="stat">
+            <span class="stat-label">Score</span>
+            <span class="stat-value" id="final-score">0</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Best</span>
+            <span class="stat-value" id="final-best">0</span>
+          </div>
+        </div>
+        <div id="new-best" class="hidden">New best!</div>
+        <button id="restart-btn" type="button">Rebuild (R)</button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

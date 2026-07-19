@@ -7,4 +7,4 @@ export const PEDESTAL = {
 export const DROP_CLEARANCE = 2.2;
 export const MOVE_RANGE = 2.6;
 export const FAIL_Y = 0.35;
-export const BEST_KEY = 'glass-towers-best';
+export const BEST_KEY = 'glass-towers-best-v2';

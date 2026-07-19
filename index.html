@@ -2,7 +2,9 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; worker-src 'none'; frame-src 'none'; media-src 'none'; manifest-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Glass Towers</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='8' y='18' width='16' height='6' rx='1' fill='%239fd8ff'/%3E%3Crect x='11' y='10' width='10' height='7' rx='1' fill='%23c9b8f6'/%3E%3Crect x='13' y='4' width='6' height='5' rx='1' fill='%23a9edc9'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="/src/style.css" />
@@ -10,41 +12,56 @@
   <body>
     <div id="app"></div>
 
-    <div id="hud">
-      <div id="score-panel">
+    <section id="loading" data-stage="1" role="status" aria-live="polite" aria-atomic="true">
+      <h1 class="loading-brand">Glass<br />Towers</h1>
+      <div class="loading-glass" aria-hidden="true"></div>
+      <div class="loading-status">
+        <div class="loading-track"><span></span></div>
+        <div class="loading-stage">
+          <strong>Preparing the gallery</strong>
+          <span>01 / 04</span>
+        </div>
+        <p>Loading the rendering runtime</p>
+      </div>
+      <p class="loading-mode">Single player showcase</p>
+    </section>
+
+    <div id="hud" aria-label="Game status">
+      <div id="brand" aria-label="Glass Towers">Glass Towers</div>
+      <div id="score-panel" role="status" aria-live="polite" aria-atomic="false">
         <div class="stat">
-          <span class="stat-label">Score</span>
-          <span class="stat-value" id="score">0</span>
+          <span class="stat-label" id="score-label">Score</span>
+          <output class="stat-value" id="score" aria-labelledby="score-label">00</output>
         </div>
         <div class="stat">
-          <span class="stat-label">Best</span>
-          <span class="stat-value" id="best">0</span>
+          <span class="stat-label" id="best-label">Best</span>
+          <output class="stat-value" id="best" aria-labelledby="best-label">00</output>
         </div>
       </div>
-      <div id="next-panel">
-        <span class="stat-label">Next</span>
-        <canvas id="next-preview" width="112" height="112"></canvas>
+      <div id="next-panel" aria-label="Next piece">
+        <span class="hud-label" aria-hidden="true">Next</span>
+        <canvas id="next-preview" width="112" height="112" role="img" aria-label="Next glass piece preview">
+          Next glass piece preview.
+        </canvas>
       </div>
-      <div id="hint">Move: mouse / drag / arrows &middot; Drop: click / tap / space</div>
-      <div id="toast" class="hidden"></div>
+      <div id="tutorial" role="status" aria-live="polite">
+        <span class="tutorial-dot" aria-hidden="true"></span>
+        <span class="tutorial-copy">
+          <strong id="tutorial-primary">Click to focus</strong>
+          <small id="tutorial-secondary">Activate the game view</small>
+        </span>
+      </div>
+      <div id="tagline" aria-hidden="true">Move <i></i> Drop <i></i> Balance</div>
+      <button id="reset-btn" type="button" aria-label="Reset tower">Reset</button>
     </div>
 
-    <div id="game-over" class="hidden">
-      <div id="game-over-card">
-        <h1>Shattered</h1>
-        <p id="game-over-subtitle">Your tower toppled.</p>
-        <div id="final-stats">
-          <div class="stat">
-            <span class="stat-label">Score</span>
-            <span class="stat-value" id="final-score">0</span>
-          </div>
-          <div class="stat">
-            <span class="stat-label">Best</span>
-            <span class="stat-value" id="final-best">0</span>
-          </div>
-        </div>
-        <div id="new-best" class="hidden">New best!</div>
-        <button id="restart-btn" type="button">Rebuild (R)</button>
+    <div id="game-over" class="hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="game-over-title" aria-describedby="game-over-subtitle">
+      <div id="game-over-copy" tabindex="-1">
+        <h1 id="game-over-title">Tower Lost</h1>
+        <p id="game-over-subtitle"><output id="final-score">0</output> pieces held.</p>
+        <output id="final-best" class="sr-only">0</output>
+        <span id="new-best" class="sr-only hidden">New best</span>
+        <button id="restart-btn" type="button">Try Again</button>
       </div>
     </div>
 

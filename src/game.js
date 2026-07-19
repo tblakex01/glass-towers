@@ -1,177 +1,293 @@
-import * as THREE from 'three';
-import * as CANNON from 'cannon-es';
-import { PEDESTAL, DROP_CLEARANCE, MOVE_RANGE, FAIL_Y } from './constants.js';
-import { shapeById, randomShapeId } from './shapes.js';
+import * as THREE from 'three/webgpu';
+import { DROP_CLEARANCE, FAIL_Y, MOVE_RANGE, PEDESTAL } from './constants.js';
+import {
+  challengeSpawnPosition,
+  createScaledQueueEntry,
+  createSeededRandom,
+} from './gameplay-policy.js';
 import { createGlassMaterial } from './glass.js';
+import { createAimShadow } from './render/aim-shadow.js';
 import { getBest, saveBest } from './ui.js';
 
-const AIM_LERP = 12;
+const AIM_RESPONSE = 12;
 const SETTLE_SPEED = 0.12;
-const SETTLE_ANGULAR = 0.15;
+const SETTLE_ANGULAR_SPEED = 0.15;
 const SETTLE_TIME = 0.7;
-const PRECISION_DIST = 0.25;
-const IMPACT_MIN = 1;
-const IMPACT_MAX = 8;
+const PEDESTAL_FOOTPRINT = Object.freeze({ radius: PEDESTAL.radius });
+const PEDESTAL_POSITION = Object.freeze({ x: 0, z: 0 });
 
-export function createGame({ env, physics, effects, ui, input }) {
-  const pieces = []; // dropped pieces: { group, mesh, body, shapeDef, settled }
-  let state = 'aiming'; // 'aiming' | 'falling' | 'gameover'
-  let current = null; // aiming piece: { group, mesh, shapeDef } — visual only, no body yet
-  let currentId = null;
-  let nextId = null;
+function randomSeed() {
+  if (globalThis.crypto?.getRandomValues) {
+    return globalThis.crypto.getRandomValues(new Uint32Array(1))[0];
+  }
+  return (Date.now() ^ Math.floor(Math.random() * 0x100000000)) >>> 0;
+}
+
+export function createGame({ env, physics, effects, placementGuide, ui, input, seed = null }) {
+  const pieces = [];
+  const aimTarget = { x: 0, z: 0 };
+  const aimPosition = { x: 0, z: 0 };
+  const impactPoint = new THREE.Vector3();
+  const structureBounds = new THREE.Box3();
+  const objectBounds = new THREE.Box3();
+  let state = 'aiming';
+  let current = null;
+  let currentEntry = null;
+  let nextEntry = null;
   let score = 0;
   let best = getBest();
   let bestAtRunStart = best;
   let towerTopY = PEDESTAL.topY;
   let settleTimer = 0;
   let bobTime = 0;
-  const aimTarget = { x: 0, z: 0 };
-  const aimPos = { x: 0, z: 0 };
-  // Scratch vector reused for every collision's contact point so impact
-  // handling stays allocation-free (effects.onImpact copies it eagerly).
-  const impactPoint = new THREE.Vector3();
+  let aimRailZ = 0;
+  let queueIndex = 0;
+  let runSeed = seed ?? randomSeed();
+  let random = createSeededRandom(runSeed);
 
   physics.addPedestal();
   ui.setScore(0);
   ui.setBest(best);
 
-  function hoverY() {
-    return towerTopY + DROP_CLEARANCE;
+  function createQueueEntry(placementIndex, previousShapeId) {
+    return createScaledQueueEntry({ placementIndex, previousShapeId, random });
   }
 
   function advanceQueue() {
-    currentId = nextId ?? randomShapeId(null);
-    nextId = randomShapeId(currentId);
-    ui.setNextShape(shapeById(nextId));
+    currentEntry = nextEntry ?? createQueueEntry(queueIndex, null);
+    queueIndex = currentEntry.placementIndex + 1;
+    nextEntry = createQueueEntry(queueIndex, currentEntry.shapeId);
+    ui.setNextShape(nextEntry.shape);
+  }
+
+  function supportForCurrentPiece() {
+    const support = [...pieces].reverse().find((piece) => piece.settled);
+    if (!support) {
+      return { body: null, position: PEDESTAL_POSITION, footprint: PEDESTAL_FOOTPRINT };
+    }
+    return {
+      body: support.body,
+      position: physics.translation(support.body),
+      footprint: support.shapeDef.footprint,
+      mesh: support.mesh,
+    };
+  }
+
+  function hoverY(shapeDef) {
+    return towerTopY + DROP_CLEARANCE + shapeDef.height / 2 - shapeDef.geometryOffset[1];
+  }
+
+  function updatePlacementGuide() {
+    placementGuide.update({
+      x: aimPosition.x,
+      y: towerTopY + DROP_CLEARANCE - 0.38,
+      z: aimRailZ,
+      movementRange: MOVE_RANGE,
+    });
   }
 
   function spawnPiece() {
-    const shapeDef = shapeById(currentId);
-    const mesh = new THREE.Mesh(shapeDef.createGeometry(), createGlassMaterial({ tint: shapeDef.tint }));
+    const shapeDef = currentEntry.shape;
+    const geometry = shapeDef.createGeometry();
+    const material = createGlassMaterial({
+      tint: shapeDef.tint,
+      thickness: Math.max(0.28, shapeDef.height * 0.72),
+      scale: shapeDef.scale,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = `glass-${shapeDef.id}-${shapeDef.scale.toFixed(3)}`;
     mesh.castShadow = true;
     mesh.receiveShadow = true;
-    // Group origin tracks the (future) body origin, i.e. the center of mass;
-    // the mesh sits at comOffset so its geometric center lands in the right spot.
-    const comOffset = shapeDef.comOffset || [0, 0, 0];
-    mesh.position.set(comOffset[0], comOffset[1], comOffset[2]);
+    mesh.position.set(...shapeDef.geometryOffset);
+
     const group = new THREE.Group();
+    group.name = `piece-${currentEntry.placementIndex}`;
     group.add(mesh);
-    group.position.set(aimPos.x, hoverY(), aimPos.z);
+    const support = supportForCurrentPiece();
+    aimRailZ = support.position.z;
+    const spawn = challengeSpawnPosition({
+      placementIndex: currentEntry.placementIndex,
+      supportPosition: support.position,
+      pieceFootprint: shapeDef.footprint,
+      supportFootprint: support.footprint,
+      seed: runSeed,
+      moveRange: MOVE_RANGE,
+    });
+    aimTarget.x = aimPosition.x = spawn.x;
+    aimTarget.z = aimPosition.z = spawn.z;
+    group.position.set(spawn.x, hoverY(shapeDef), spawn.z);
     env.scene.add(group);
-    current = { group, mesh, shapeDef };
-    input.setAimPlaneY(hoverY());
+    const aimShadow = support.mesh ? createAimShadow({ receiver: support.mesh, caster: mesh }) : null;
+    aimShadow?.update(spawn.x, spawn.z);
+    current = { group, mesh, shapeDef, supportBody: support.body, aimShadow };
+    input.setAimPlaneY(group.position.y);
+    updatePlacementGuide();
+    placementGuide.show();
     bobTime = 0;
   }
 
-  function disposePiece(piece) {
+  function disposeVisual(piece) {
+    piece.aimShadow?.dispose();
     env.scene.remove(piece.group);
     piece.mesh.geometry.dispose();
     piece.mesh.material.dispose();
   }
 
   function attachImpactListener(piece) {
-    piece.body.addEventListener('collide', (e) => {
-      const v = Math.abs(e.contact.getImpactVelocityAlongNormal());
-      if (v < IMPACT_MIN) return;
-      const intensity = Math.min(1, (v - IMPACT_MIN) / (IMPACT_MAX - IMPACT_MIN));
-      const r = e.contact.bi === piece.body ? e.contact.ri : e.contact.rj;
-      const p = piece.body.position;
-      impactPoint.set(p.x + r.x, p.y + r.y, p.z + r.z);
+    piece.removeImpactListener = physics.onImpact(piece.body, (position, intensity) => {
+      impactPoint.set(position.x, position.y, position.z);
       effects.onImpact(impactPoint, intensity);
     });
   }
 
-  function setAimTarget(x, z) {
+  function setAimTarget(x) {
+    if (!Number.isFinite(x)) return;
     aimTarget.x = THREE.MathUtils.clamp(x, -MOVE_RANGE, MOVE_RANGE);
-    aimTarget.z = THREE.MathUtils.clamp(z, -MOVE_RANGE, MOVE_RANGE);
+    aimTarget.z = aimRailZ;
   }
 
   function drop() {
     if (state !== 'aiming' || !current) return;
-    const { group, mesh, shapeDef } = current;
+    ui.setStarted();
+    const { group, mesh, shapeDef, supportBody } = current;
+    current.aimShadow?.dispose();
     const body = physics.createBody(shapeDef, group.position);
-    const piece = { group, mesh, body, shapeDef, settled: false };
+    const piece = {
+      group,
+      mesh,
+      body,
+      shapeDef,
+      supportBody,
+      settled: false,
+      removeImpactListener: null,
+    };
     pieces.push(piece);
     attachImpactListener(piece);
     current = null;
+    placementGuide.hide();
     settleTimer = 0;
     state = 'falling';
   }
 
-  function settlePiece(piece) {
-    piece.settled = true;
-    score += 10;
-    const below = pieces.length >= 2 ? pieces[pieces.length - 2].body.position : { x: 0, z: 0 };
-    const p = piece.body.position;
-    if (Math.hypot(p.x - below.x, p.z - below.z) < PRECISION_DIST) {
-      score += 5;
-      ui.showToast('Perfect! +5');
+  function recalculateTowerTop() {
+    towerTopY = PEDESTAL.topY;
+    for (const piece of pieces) {
+      if (!piece.settled) continue;
+      objectBounds.setFromObject(piece.group);
+      towerTopY = Math.max(towerTopY, objectBounds.max.y);
     }
+  }
+
+  function settlePiece(piece) {
+    if (state !== 'falling' || piece.settled) return;
+    const position = physics.translation(piece.body);
+    const insideAimRange = Math.abs(position.x) <= MOVE_RANGE && Math.abs(position.z) <= MOVE_RANGE;
+    if (!insideAimRange || !physics.hasSupportContact(piece.body, piece.supportBody)) {
+      gameOver();
+      return;
+    }
+
+    piece.settled = true;
+    state = 'settling';
+    score += 1;
     ui.setScore(score);
     if (score > best) {
       best = score;
       saveBest(best);
       ui.setBest(best);
     }
-    towerTopY = PEDESTAL.topY;
-    for (const pc of pieces) {
-      if (!pc.settled) continue;
-      const com = pc.shapeDef.comOffset || [0, 0, 0];
-      // Approximate top of piece, ignoring tilt: geometric center + half height.
-      towerTopY = Math.max(towerTopY, pc.body.position.y + com[1] + pc.shapeDef.height / 2);
+    recalculateTowerTop();
+    try {
+      advanceQueue();
+      spawnPiece();
+      state = 'aiming';
+    } catch (error) {
+      gameOver();
+      throw error;
     }
-    advanceQueue();
-    spawnPiece();
-    state = 'aiming';
   }
 
   function gameOver() {
+    if (state === 'gameover') return;
     state = 'gameover';
     if (current) {
-      disposePiece(current);
+      disposeVisual(current);
       current = null;
     }
+    placementGuide.hide();
     ui.showGameOver(score, best, score > bestAtRunStart);
   }
 
-  function restart() {
-    for (const piece of pieces) disposePiece(piece);
+  function clearPieces() {
+    for (const piece of pieces) {
+      piece.removeImpactListener?.();
+      disposeVisual(piece);
+    }
     pieces.length = 0;
     if (current) {
-      disposePiece(current);
+      disposeVisual(current);
       current = null;
     }
+  }
+
+  function restart() {
+    clearPieces();
     physics.reset();
     effects.reset();
     score = 0;
-    ui.setScore(0);
     bestAtRunStart = best;
     towerTopY = PEDESTAL.topY;
     settleTimer = 0;
-    aimTarget.x = aimTarget.z = 0;
-    aimPos.x = aimPos.z = 0;
-    nextId = null;
-    advanceQueue();
-    spawnPiece();
+    queueIndex = 0;
+    runSeed = seed ?? randomSeed();
+    random = createSeededRandom(runSeed);
+    currentEntry = null;
+    nextEntry = null;
+    ui.setScore(0);
     ui.hideGameOver();
     state = 'aiming';
+    advanceQueue();
+    spawnPiece();
+  }
+
+  function syncPhysics() {
+    for (const piece of pieces) {
+      const position = physics.translation(piece.body);
+      const rotation = physics.rotation(piece.body);
+      piece.group.position.set(position.x, position.y, position.z);
+      piece.group.quaternion.set(rotation.x, rotation.y, rotation.z, rotation.w);
+    }
+  }
+
+  function structureFrame() {
+    structureBounds.makeEmpty();
+    structureBounds.expandByPoint(new THREE.Vector3(-PEDESTAL.radius, 0, -PEDESTAL.radius));
+    structureBounds.expandByPoint(new THREE.Vector3(PEDESTAL.radius, PEDESTAL.topY, PEDESTAL.radius));
+    for (const piece of pieces) {
+      objectBounds.setFromObject(piece.group);
+      if (objectBounds.max.y > -2.5) structureBounds.union(objectBounds);
+    }
+    if (current) {
+      objectBounds.setFromObject(current.group);
+      structureBounds.union(objectBounds);
+    }
+    return {
+      topY: Math.max(PEDESTAL.topY, structureBounds.max.y),
+      bottomY: Math.max(-2.5, structureBounds.min.y),
+      state,
+    };
   }
 
   function update(dt) {
     physics.step(dt);
-
-    for (const piece of pieces) {
-      piece.group.position.copy(piece.body.position);
-      piece.group.quaternion.copy(piece.body.quaternion);
-    }
+    syncPhysics();
 
     if (state !== 'gameover') {
       for (const piece of pieces) {
-        const p = piece.body.position;
-        // Fell below the pedestal, or dropped past its top while horizontally
-        // clear of it (e.g. resting on the floor) — either way it's off.
-        const offSide = p.y < PEDESTAL.topY - 0.05 && Math.hypot(p.x, p.z) > PEDESTAL.radius + 0.5;
-        if (p.y < FAIL_Y || offSide) {
+        const position = physics.translation(piece.body);
+        const lostSupport = piece.settled && physics.isSleeping(piece.body) &&
+          !physics.hasSupportContact(piece.body, piece.supportBody);
+        if (position.y < FAIL_Y || lostSupport) {
           gameOver();
           break;
         }
@@ -180,20 +296,25 @@ export function createGame({ env, physics, effects, ui, input }) {
 
     if (state === 'aiming' && current) {
       bobTime += dt;
-      const t = Math.min(1, AIM_LERP * dt);
-      aimPos.x += (aimTarget.x - aimPos.x) * t;
-      aimPos.z += (aimTarget.z - aimPos.z) * t;
-      current.group.position.set(aimPos.x, hoverY() + Math.sin(bobTime * 2.2) * 0.05, aimPos.z);
+      const response = 1 - Math.exp(-AIM_RESPONSE * dt);
+      aimPosition.x += (aimTarget.x - aimPosition.x) * response;
+      aimPosition.z += (aimTarget.z - aimPosition.z) * response;
+      current.group.position.set(
+        aimPosition.x,
+        hoverY(current.shapeDef) + Math.sin(bobTime * 2.2) * 0.05,
+        aimPosition.z
+      );
+      current.aimShadow?.update(aimPosition.x, aimPosition.z);
+      updatePlacementGuide();
     } else if (state === 'falling' && pieces.length > 0) {
-      const body = pieces[pieces.length - 1].body;
-      const slow = body.velocity.length() < SETTLE_SPEED && body.angularVelocity.length() < SETTLE_ANGULAR;
+      const piece = pieces[pieces.length - 1];
+      const slow = physics.linearSpeed(piece.body) < SETTLE_SPEED &&
+        physics.angularSpeed(piece.body) < SETTLE_ANGULAR_SPEED;
       settleTimer = slow ? settleTimer + dt : 0;
-      if (body.sleepState === CANNON.Body.SLEEPING || settleTimer >= SETTLE_TIME) {
-        settlePiece(pieces[pieces.length - 1]);
-      }
+      if (physics.isSleeping(piece.body) || settleTimer >= SETTLE_TIME) settlePiece(piece);
     }
 
-    env.updateCamera(towerTopY, dt);
+    env.updateCamera(structureFrame(), dt);
   }
 
   advanceQueue();
@@ -202,12 +323,13 @@ export function createGame({ env, physics, effects, ui, input }) {
   return {
     update,
     restart,
-    onAim({ x, z }) {
-      if (state === 'aiming') setAimTarget(x, z);
+    onAim({ x }) {
+      if (state === 'aiming') setAimTarget(x);
     },
-    onNudge({ dx, dz }) {
-      if (state === 'aiming') setAimTarget(aimTarget.x + dx, aimTarget.z + dz);
+    onNudge({ dx }) {
+      if (state === 'aiming') setAimTarget(aimTarget.x + dx);
     },
     onDrop: drop,
+    getSnapshot: () => Object.freeze({ state, score, best, placementIndex: currentEntry?.placementIndex ?? 0 }),
   };
 }
